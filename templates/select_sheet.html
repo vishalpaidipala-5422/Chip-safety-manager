@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>Select Sheet</title>
+  </head>
+  <body>
+    <h1>Select Sheet</h1>
+    <form action="/select_columns" method="post">
+      <select name="sheet">
+        {% for sheet in sheets %}
+          <option value="{{ sheet }}">{{ sheet }}</option>
+        {% endfor %}
+      </select>
+      <input type="submit" value="Next" />
+    </form>
+  </body>
+</html>
