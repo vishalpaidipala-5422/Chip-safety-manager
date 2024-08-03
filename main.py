@@ -148,7 +148,37 @@ def select_columns():
 
 @tool.route('/fill_data', methods=['POST'])
 def fill_data():
-    return render_template("safety_plan.html")
+    sheet_name = session.get('sheet_name')
+    file_path = session.get('file_path')
+    df = pd.read_excel(file_path, sheet_name=sheet_name)
+
+    # Retrieve dropdown selections and user input data
+    user_inputs = request.form.getlist('user_input')
+
+    # Validate lengths
+    if len(user_inputs) != len(df):
+        flash(
+            f"Number of inputs ({len(user_inputs)}) does not match number of rows in the sheet ({len(df)}).",
+            'error')
+        return redirect(url_for('select_columns'))
+
+    # Create new column
+    df['New Column'] = user_inputs
+
+    # Output Excel
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+
+    output.seek(0)
+
+    # Clean up the uploaded file
+    if os.path.exists(file_path):
+        os.remove(file_path)
+
+    return send_file(output,
+                     attachment_filename='output.xlsx',
+                     as_attachment=True)
 
 
 if __name__ == "__main__":
