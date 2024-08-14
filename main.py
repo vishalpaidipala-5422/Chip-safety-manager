@@ -2,7 +2,10 @@ from flask import Flask, request, render_template, redirect, url_for, flash, sen
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 import pandas as pd
 from io import BytesIO
+import tempfile
 import os
+import shutil
+import numpy as np
 
 tool = Flask(__name__)
 tool.secret_key = 'supersecretkey'
@@ -116,69 +119,106 @@ def safety_plan():
     return render_template('safety_plan.html')
 
 
-@tool.route('/uploader', methods=['POST'])
-def uploader():
-    if 'file' not in request.files:
-        return "No file part"
+@tool.route('/upload', methods=['POST'])
+def process_file():
     file = request.files['file']
-    if file.filename == '':
-        return "No selected file"
 
-    file_path = os.path.join(tool.config['UPLOAD_FOLDER'], file.filename)
-    file.save(file_path)
-    session['file_path'] = file_path
+    # Create a temporary directory
+    temp_dir = tempfile.mkdtemp()
+    temp_file_path = os.path.join(temp_dir, 'uploaded_file.xlsx')
 
-    sheets = pd.ExcelFile(file_path).sheet_names
-    return render_template('select_sheet.html', sheets=sheets)
+    # Save the file to the temporary directory
+    file.save(temp_file_path)
+    session['file_path'] = temp_file_path
+    session['temp_dir'] = temp_dir
+
+    # Read the Excel file to get sheet names
+    excel_file = pd.ExcelFile(temp_file_path)
+    sheet_names = excel_file.sheet_names
+
+    return render_template('combined_form.html', sheet_names=sheet_names)
 
 
-@tool.route('/select_columns', methods=['POST'])
-def select_columns():
-    sheet_name = request.form['sheet']
-    session['sheet_name'] = sheet_name
+@tool.route('/process_file', methods=['POST'])
+def process_and_search():
+    sheet_name = request.form['sheet_name']
+    search_query = request.form['search_query']
     file_path = session.get('file_path')
-    df = pd.read_excel(file_path, sheet_name=sheet_name)
-    columns = df.columns.tolist()
-    column_data = df[columns[0]].dropna().unique(
-    )  # Unique values from the first column as an example
-    return render_template('select_column.html',
-                           columns=columns,
-                           data=column_data)
 
-
-@tool.route('/fill_data', methods=['POST'])
-def fill_data():
-    sheet_name = session.get('sheet_name')
-    file_path = session.get('file_path')
+    # Read the selected sheet
     df = pd.read_excel(file_path, sheet_name=sheet_name)
 
-    # Retrieve dropdown selections and user input data
-    user_inputs = request.form.getlist('user_input')
+    # Replace NaN or float values with an empty string
+    df = df.replace([np.nan, 'nan', 'NaN', 'None', np.inf, -np.inf],
+                    '',
+                    regex=True)
+    df = df.applymap(lambda x: ''
+                     if isinstance(x, (float, np.float64, np.float32)) else x)
 
-    # Validate lengths
-    if len(user_inputs) != len(df):
-        flash(
-            f"Number of inputs ({len(user_inputs)}) does not match number of rows in the sheet ({len(df)}).",
-            'error')
-        return redirect(url_for('select_columns'))
+    # Convert DataFrame to list of dictionaries for easier handling in the template
+    df_dict = df.to_dict(orient='records')
 
-    # Create new column
-    df['New Column'] = user_inputs
+    # Find positions of the search string
+    mask = df.applymap(lambda x: search_query.lower() in x.lower()
+                       if isinstance(x, str) else False)
+    positions = list(zip(*mask.to_numpy().nonzero()))
 
-    # Output Excel
+    # Enumerate the rows and columns, and prepare the data for the template
+    enumerated_data = [(i, list(enumerate(row.items())))
+                       for i, row in enumerate(df_dict)]
+
+    return render_template('combined_form.html',
+                           sheet_names=[sheet_name],
+                           df=enumerated_data,
+                           sheet_name=sheet_name,
+                           search_query=search_query,
+                           positions=positions)
+
+
+@tool.route('/fill_values', methods=['POST'])
+def fill_values():
+    sheet_name = request.form['sheet_name']
+    search_query = request.form['search_query']
+    file_path = session.get('file_path')
+    temp_dir = session.get('temp_dir')
+
+    # Read the selected sheet
+    df = pd.read_excel(file_path, sheet_name=sheet_name)
+
+    # Replace NaN or float values with an empty string
+    df = df.replace([np.nan, 'nan', 'NaN', 'None', np.inf, -np.inf],
+                    '',
+                    regex=True)
+    df = df.applymap(lambda x: ''
+                     if isinstance(x, (float, np.float64, np.float32)) else x)
+
+    # Fill the user inputs at the corresponding cells
+    for pos in request.form:
+        if pos not in ['sheet_name', 'search_query']:
+            row, col = map(int, pos.split('_'))
+            df.iat[row, col] = request.form[pos]
+
+    # Save the modified DataFrame to a new Excel file, preserving the original
     output = BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name=sheet_name)
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        with pd.ExcelFile(file_path) as original_file:
+            for sheet in original_file.sheet_names:
+                original_data = pd.read_excel(file_path, sheet_name=sheet)
+                if sheet == sheet_name:
+                    original_data = df
+                original_data.to_excel(writer, sheet_name=sheet, index=False)
 
     output.seek(0)
 
-    # Clean up the uploaded file
-    if os.path.exists(file_path):
-        os.remove(file_path)
+    # Clean up the temporary file and directory
+    if file_path and os.path.exists(file_path):
+        try:
+            os.remove(file_path)
+            shutil.rmtree(temp_dir)
+        except Exception as e:
+            print(f"Error deleting temporary files: {e}")
 
-    return send_file(output,
-                     attachment_filename='output.xlsx',
-                     as_attachment=True)
+    return send_file(output, download_name='modified.xlsx', as_attachment=True)
 
 
 if __name__ == "__main__":
